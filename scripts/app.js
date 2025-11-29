@@ -8,6 +8,12 @@ const state = {
   graphDraggingNodeId: null,
   graphDragPointerId: null,
   graphDragOffset: { x: 0, y: 0 },
+  graphPointerDown: null,
+  graphDragMoved: false,
+  graphActiveNodeId: null,
+  graphCamera: { x: 0, y: 0, scale: 1 },
+  isGraphPanning: false,
+  graphPanStart: { x: 0, y: 0 },
   intervals: {},
   videoChatCount: {},
   activeInterval: null,
@@ -36,8 +42,22 @@ const selectors = {
   sendBtn: () => document.getElementById('sendBtn'),
   graphCanvas: () => document.getElementById('graphCanvas'),
   refreshGraphBtn: () => document.getElementById('refreshGraphBtn'),
+  graphFullscreenBtn: () => document.getElementById('graphFullscreenBtn'),
+  graphExitFullscreenBtn: () => document.getElementById('graphExitFullscreenBtn'),
+  graphTooltip: () => document.getElementById('graphTooltip'),
   intervalList: () => document.getElementById('intervalList'),
+  statsSection: () => document.getElementById('statsSection'),
+  statsWrapper: () => document.querySelector('.stats-wrapper'),
+  dailyChartCanvas: () => document.getElementById('dailyChartCanvas'),
+  monthlyChartCanvas: () => document.getElementById('monthlyChartCanvas'),
+  refreshStatsBtn: () => document.getElementById('refreshStatsBtn'),
+  resizerVertical: () => document.getElementById('resizerVertical'),
+  resizerHorizontal: () => document.getElementById('resizerHorizontal'),
+  rightTopRow: () => document.querySelector('.right-top-row'),
+  graphSection: () => document.querySelector('.graph-section'),
 };
+
+let graphTooltipDismissHooked = false;
 
 document.addEventListener('DOMContentLoaded', () => {
   bootstrapVideoLibrary();
@@ -47,6 +67,8 @@ document.addEventListener('DOMContentLoaded', () => {
   hookFullscreen();
   wireIntervalInteractions();
   hookIntervalPlayback();
+  wireStats();
+  wireResizers();
 });
 
 async function bootstrapVideoLibrary() {
@@ -326,7 +348,8 @@ function renderVideoList() {
       handleDeleteVideo(video.id, video.name);
     });
 
-    item.appendChild(deleteBtn);
+    // 将删除按钮添加到 video-info 容器中，以便在同一行显示
+    item.querySelector('.video-info').appendChild(deleteBtn);
     item.addEventListener('click', () => selectVideo(video.id));
     list.appendChild(item);
   });
@@ -474,6 +497,15 @@ async function handleChatSubmit() {
       state.intervals[video.id] = intervals;
       renderIntervals(video.id);
     }
+
+    // Simulate stats update if anomaly detected
+    if (answer.includes('异常') || answer.includes('检测到')) {
+      const statsSection = selectors.statsSection();
+      if (statsSection) {
+        // Trigger click animation and refresh
+        statsSection.click();
+      }
+    }
   } catch (error) {
     replaceLastBotMessage('模型暂时不可用，请稍后重试。');
   }
@@ -519,6 +551,48 @@ function mockLLMResponse(prompt, model, video, exchangeIndex = 0) {
 
 function wireGraphControls() {
   selectors.refreshGraphBtn().addEventListener('click', refreshGraph);
+  
+  const fsBtn = selectors.graphFullscreenBtn();
+  if (fsBtn) {
+    fsBtn.addEventListener('click', () => {
+      const container = document.getElementById('graphContainer');
+      if (!document.fullscreenElement) {
+        container.requestFullscreen?.().catch(() => undefined);
+      } else {
+        document.exitFullscreen?.();
+      }
+    });
+  }
+
+  const exitFsBtn = selectors.graphExitFullscreenBtn();
+  if (exitFsBtn) {
+    exitFsBtn.addEventListener('click', () => {
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.();
+      }
+    });
+  }
+
+  document.addEventListener('fullscreenchange', () => {
+    const container = document.getElementById('graphContainer');
+    const fsBtn = selectors.graphFullscreenBtn();
+    if (document.fullscreenElement === container) {
+      if (fsBtn) fsBtn.textContent = '退出';
+      container.classList.add('is-fullscreen');
+    } else {
+      if (fsBtn) fsBtn.textContent = '全屏';
+      container.classList.remove('is-fullscreen');
+      
+      // Reset camera to initial state
+      state.graphCamera = { x: 0, y: 0, scale: 1 };
+    }
+    // Give browser a moment to resize layout
+    setTimeout(() => {
+      scaleGraphNodesToCanvas();
+      renderGraph();
+    }, 100);
+  });
+
   window.addEventListener('resize', () => {
     if (!state.graphData) return;
     scaleGraphNodesToCanvas();
@@ -530,7 +604,14 @@ function wireGraphControls() {
 function refreshGraph() {
   const video = state.videos.find((v) => v.id === state.currentVideoId);
   state.graphData = handle_graph(video);
-  state.graphNodes = layoutGraphNodes(state.graphData);
+  const canvas = selectors.graphCanvas();
+  const parent = canvas?.parentElement;
+  state.graphNodes = layoutGraphNodes(state.graphData, {
+    width: parent?.clientWidth ?? state.graphCanvasSize.width,
+    height: parent?.clientHeight ?? state.graphCanvasSize.height,
+  });
+  state.graphActiveNodeId = null;
+  hideGraphTooltip();
   renderGraph();
 }
 
@@ -540,58 +621,139 @@ function renderGraph(graphData = state.graphData) {
 
   const parent = canvas.parentElement;
   const { width: parentWidth, height: parentHeight } = parent.getBoundingClientRect();
-  canvas.width = parentWidth;
-  canvas.height = parentHeight;
-  state.graphCanvasSize = { width: canvas.width, height: canvas.height };
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = parentWidth * dpr;
+  canvas.height = parentHeight * dpr;
+  canvas.style.width = `${parentWidth}px`;
+  canvas.style.height = `${parentHeight}px`;
+  state.graphCanvasSize = { width: parentWidth, height: parentHeight };
 
   if (!state.graphNodes?.length) {
     state.graphNodes = layoutGraphNodes(graphData, {
-      width: canvas.width,
-      height: canvas.height,
+      width: parentWidth,
+      height: parentHeight,
     });
   }
 
   const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, parentWidth, parentHeight);
+
+  // Background
+  const gradient = ctx.createLinearGradient(0, 0, parentWidth, parentHeight);
+  gradient.addColorStop(0, 'rgba(0, 242, 255, 0.05)');
+  gradient.addColorStop(1, 'rgba(24, 144, 255, 0.03)');
+  ctx.fillStyle = 'rgba(5, 14, 24, 0.7)';
+  ctx.fillRect(0, 0, parentWidth, parentHeight);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, parentWidth, parentHeight);
+
+  // Apply Camera Transform
+  ctx.save();
+  ctx.translate(state.graphCamera.x, state.graphCamera.y);
+  ctx.scale(state.graphCamera.scale, state.graphCamera.scale);
+
+  // Grid
+  const gridSize = 40;
+  const visibleLeft = -state.graphCamera.x / state.graphCamera.scale;
+  const visibleTop = -state.graphCamera.y / state.graphCamera.scale;
+  const visibleRight = (parentWidth - state.graphCamera.x) / state.graphCamera.scale;
+  const visibleBottom = (parentHeight - state.graphCamera.y) / state.graphCamera.scale;
+
+  const startX = Math.floor(visibleLeft / gridSize) * gridSize;
+  const startY = Math.floor(visibleTop / gridSize) * gridSize;
+
+  ctx.strokeStyle = 'rgba(0, 242, 255, 0.06)';
+  ctx.lineWidth = 1 / state.graphCamera.scale;
+
+  ctx.beginPath();
+  for (let x = startX; x < visibleRight + gridSize; x += gridSize) {
+    ctx.moveTo(x, visibleTop);
+    ctx.lineTo(x, visibleBottom);
+  }
+  for (let y = startY; y < visibleBottom + gridSize; y += gridSize) {
+    ctx.moveTo(visibleLeft, y);
+    ctx.lineTo(visibleRight, y);
+  }
+  ctx.stroke();
 
   const nodes = state.graphNodes;
-  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-  const edges = graphData.edges ?? [];
+  const coreNode = nodes.find((node) => node.type === 'core') ?? nodes[0];
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-  ctx.lineWidth = 1.4;
-  edges.forEach((edge) => {
-    const from = nodeMap.get(edge.from);
-    const to = nodeMap.get(edge.to);
-    if (!from || !to) return;
+  // Edges (All to Core, Straight)
+  if (coreNode) {
+    nodes.forEach((node) => {
+      if (node === coreNode) return;
 
-    ctx.beginPath();
-    ctx.moveTo(from.x, from.y);
-    ctx.lineTo(to.x, to.y);
-    ctx.stroke();
-  });
+      const strokeColor = 'rgba(255,255,255,0.2)';
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 1.5;
 
+      ctx.beginPath();
+      ctx.moveTo(node.x, node.y);
+      ctx.lineTo(coreNode.x, coreNode.y);
+      ctx.stroke();
+    });
+  }
+
+  // Nodes
   nodes.forEach((node) => {
-    const radius = node.fixed ? 13 : 10;
+    const { fill, stroke } = getGraphNodeTheme(node);
+    const radius = getGraphNodeRadius(node);
+    
     ctx.beginPath();
-    ctx.fillStyle =
-      node.id === state.graphDraggingNodeId
-        ? 'rgba(243,185,72,0.95)'
-        : node.fixed
-          ? 'rgba(77,163,255,0.9)'
-          : 'rgba(255,255,255,0.85)';
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = node.id === state.graphActiveNodeId ? 3 : 2;
+    ctx.strokeStyle = stroke;
+    ctx.fillStyle = fill;
+    
+    if (node.id === state.graphActiveNodeId) {
+      ctx.shadowColor = 'rgba(0, 242, 255, 0.8)';
+      ctx.shadowBlur = 22;
+    } else {
+      ctx.shadowColor = 'transparent';
+      ctx.shadowBlur = 0;
+    }
+    
     ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+    ctx.shadowBlur = 0;
 
-    ctx.fillStyle = '#fff';
-    ctx.font = '12px Inter';
+    // Label
+    ctx.fillStyle = '#d8e8ff';
+    ctx.font = '12px "Inter", "PingFang SC", sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.fillText(node.label, node.x, node.y + radius + 6);
   });
+
+  ctx.restore(); // Restore camera
+  ctx.restore(); // Restore DPR
+}
+
+const GRAPH_NODE_THEME = {
+  core: { fill: 'rgba(0, 242, 255, 0.35)', stroke: 'rgba(0, 242, 255, 0.9)' },
+  summary: { fill: 'rgba(24, 144, 255, 0.25)', stroke: 'rgba(24, 144, 255, 0.9)' },
+  meta: { fill: 'rgba(111, 255, 233, 0.15)', stroke: 'rgba(111, 255, 233, 0.7)' },
+  metric: { fill: 'rgba(255, 169, 64, 0.2)', stroke: 'rgba(255, 169, 64, 0.8)' },
+  tag: { fill: 'rgba(138, 115, 255, 0.2)', stroke: 'rgba(138, 115, 255, 0.75)' },
+  hub: { fill: 'rgba(255, 255, 255, 0.08)', stroke: 'rgba(255, 255, 255, 0.45)' },
+  status: { fill: 'rgba(255, 99, 125, 0.2)', stroke: 'rgba(255, 99, 125, 0.85)' },
+  insight: { fill: 'rgba(0, 0, 0, 0.35)', stroke: 'rgba(0, 242, 255, 0.4)' },
+  default: { fill: 'rgba(255,255,255,0.2)', stroke: 'rgba(255,255,255,0.6)' },
+};
+
+function getGraphNodeTheme(node) {
+  return GRAPH_NODE_THEME[node.type] ?? GRAPH_NODE_THEME.default;
+}
+
+function getGraphNodeRadius(node) {
+  if (node.type === 'core') return 18;
+  if (node.type === 'hub') return 15;
+  if (node.type === 'tag') return 10;
+  if (node.type === 'insight') return 12;
+  return node.fixed ? 14 : 12;
 }
 
 function layoutGraphNodes(graphData, bounds = {}) {
@@ -600,24 +762,37 @@ function layoutGraphNodes(graphData, bounds = {}) {
   const height = bounds.height ?? canvas?.parentElement?.clientHeight ?? 240;
   const centerX = width / 2;
   const centerY = height / 2;
-  const floatingNodes = [];
+  const nodes = (graphData.nodes ?? []).map((node) => ({ ...node }));
 
-  const nodes = (graphData.nodes ?? []).map((node) => {
-    if (node.fixed) {
-      return {
-        ...node,
-        x: centerX,
-        y: centerY,
-      };
-    }
-    const clone = { ...node };
-    floatingNodes.push(clone);
-    return clone;
+  const coreNode = nodes.find((node) => node.fixed || node.type === 'core') ?? nodes[0];
+  if (coreNode) {
+    coreNode.x = centerX;
+    coreNode.y = centerY;
+    coreNode.fixed = true;
+  }
+
+  const shortestSide = Math.min(width, height);
+  const ringConfigs = [
+    { types: ['summary', 'status'], radius: Math.max(shortestSide * 0.15, 50), phase: 0 },
+    { types: ['meta', 'metric'], radius: Math.max(shortestSide * 0.22, 80), phase: Math.PI / 6 },
+    { types: ['hub'], radius: Math.max(shortestSide * 0.28, 100), phase: Math.PI / 4 },
+    { types: ['tag', 'insight'], radius: Math.max(shortestSide * 0.35, 130), phase: Math.PI / 3 },
+  ];
+
+  ringConfigs.forEach(({ types, radius, phase }) => {
+    const groupNodes = nodes.filter((node) => types.includes(node.type));
+    if (!groupNodes.length) return;
+    groupNodes.forEach((node, index) => {
+      const angle = phase + (index / Math.max(groupNodes.length, 1)) * Math.PI * 2;
+      node.x = centerX + radius * Math.cos(angle);
+      node.y = centerY + radius * Math.sin(angle);
+    });
   });
 
-  const radius = Math.max(Math.min(centerX, centerY) - 40, 60);
-  floatingNodes.forEach((node, index) => {
-    const angle = (index / Math.max(floatingNodes.length, 1)) * Math.PI * 2;
+  const leftovers = nodes.filter((node) => node.x === undefined || node.y === undefined);
+  leftovers.forEach((node, index) => {
+    const radius = Math.max(shortestSide * 0.25, 90);
+    const angle = (index / Math.max(leftovers.length, 1)) * Math.PI * 2;
     node.x = centerX + radius * Math.cos(angle);
     node.y = centerY + radius * Math.sin(angle);
   });
@@ -660,64 +835,129 @@ function hookGraphInteractions() {
   canvas.addEventListener('pointermove', handleGraphPointerMove);
   canvas.addEventListener('pointerup', handleGraphPointerUp);
   canvas.addEventListener('pointerleave', handleGraphPointerUp);
+  canvas.addEventListener('pointercancel', handleGraphPointerUp);
+  canvas.addEventListener('wheel', handleGraphWheel, { passive: false });
+
+  if (!graphTooltipDismissHooked) {
+    document.addEventListener('pointerdown', (event) => {
+      const graphCanvas = selectors.graphCanvas();
+      if (!graphCanvas) return;
+      if (event.target === graphCanvas || graphCanvas.contains(event.target)) {
+        return;
+      }
+      state.graphActiveNodeId = null;
+      hideGraphTooltip();
+      if (state.graphData) {
+        renderGraph();
+      }
+    });
+    graphTooltipDismissHooked = true;
+  }
 }
 
 function handleGraphPointerDown(event) {
   const canvas = selectors.graphCanvas();
   if (!canvas || !state.graphNodes?.length) return;
 
-  const position = getGraphPointerPosition(event, canvas);
-  const target = findGraphNodeAtPosition(position);
-  if (!target) return;
+  const worldPos = getGraphWorldPosition(event, canvas);
+  const target = findGraphNodeAtPosition(worldPos);
+  
+  if (target) {
+    state.graphActiveNodeId = target.id;
+    renderGraph();
+    return;
+  }
 
-  state.graphDraggingNodeId = target.id;
+  hideGraphTooltip();
+  state.graphActiveNodeId = null;
+  
+  state.isGraphPanning = true;
   state.graphDragPointerId = event.pointerId;
-  state.graphDragOffset = {
-    x: target.x - position.x,
-    y: target.y - position.y,
-  };
+  const screenPos = getGraphPointerPosition(event, canvas);
+  state.graphPanStart = { x: screenPos.x, y: screenPos.y };
+  state.graphCameraStart = { ...state.graphCamera };
+  
   canvas.setPointerCapture?.(event.pointerId);
   renderGraph();
 }
 
 function handleGraphPointerMove(event) {
-  if (!state.graphDraggingNodeId) return;
   const canvas = selectors.graphCanvas();
   if (!canvas) return;
 
-  if (state.graphDragPointerId !== null && event.pointerId !== state.graphDragPointerId) {
-    return;
+  if (state.isGraphPanning) {
+    if (state.graphDragPointerId !== null && event.pointerId !== state.graphDragPointerId) return;
+    
+    const screenPos = getGraphPointerPosition(event, canvas);
+    const dx = screenPos.x - state.graphPanStart.x;
+    const dy = screenPos.y - state.graphPanStart.y;
+    
+    state.graphCamera.x = state.graphCameraStart.x + dx;
+    state.graphCamera.y = state.graphCameraStart.y + dy;
+    
+    renderGraph();
   }
-
-  const node = state.graphNodes.find((entry) => entry.id === state.graphDraggingNodeId);
-  if (!node) return;
-
-  const { x, y } = getGraphPointerPosition(event, canvas);
-  const margin = 24;
-  node.x = clamp(x + state.graphDragOffset.x, margin, canvas.width - margin);
-  node.y = clamp(y + state.graphDragOffset.y, margin, canvas.height - margin);
-  renderGraph();
 }
 
 function handleGraphPointerUp(event) {
   const canvas = selectors.graphCanvas();
-  if (state.graphDragPointerId !== null && event.pointerId !== state.graphDragPointerId) {
+  if (!canvas) return;
+  
+  if (state.isGraphPanning) {
+    if (state.graphDragPointerId !== null && event.pointerId !== state.graphDragPointerId) return;
+    state.isGraphPanning = false;
+    state.graphDragPointerId = null;
+    canvas.releasePointerCapture?.(event.pointerId);
     return;
   }
-  state.graphDraggingNodeId = null;
-  state.graphDragPointerId = null;
-  state.graphDragOffset = { x: 0, y: 0 };
-  canvas?.releasePointerCapture?.(event.pointerId);
+
+  const worldPos = getGraphWorldPosition(event, canvas);
+  const target = findGraphNodeAtPosition(worldPos);
+  if (target) {
+    state.graphActiveNodeId = target.id;
+    showGraphTooltip(target, event.clientX, event.clientY);
+  } else {
+    state.graphActiveNodeId = null;
+    hideGraphTooltip();
+  }
+
+  renderGraph();
+}
+
+function handleGraphWheel(event) {
+  event.preventDefault();
+  const canvas = selectors.graphCanvas();
+  if (!canvas) return;
+
+  const zoomIntensity = 0.1;
+  const delta = event.deltaY < 0 ? 1 : -1;
+  const zoomFactor = Math.exp(delta * zoomIntensity);
+  
+  const screenPos = getGraphPointerPosition(event, canvas);
+  const worldPos = getGraphWorldPosition(event, canvas);
+  
+  const newScale = Math.max(0.1, Math.min(5, state.graphCamera.scale * zoomFactor));
+  
+  state.graphCamera.x = screenPos.x - worldPos.x * newScale;
+  state.graphCamera.y = screenPos.y - worldPos.y * newScale;
+  state.graphCamera.scale = newScale;
+  
   renderGraph();
 }
 
 function getGraphPointerPosition(event, canvas) {
   const rect = canvas.getBoundingClientRect();
-  const scaleX = canvas.width / rect.width;
-  const scaleY = canvas.height / rect.height;
   return {
-    x: (event.clientX - rect.left) * scaleX,
-    y: (event.clientY - rect.top) * scaleY,
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top,
+  };
+}
+
+function getGraphWorldPosition(event, canvas) {
+  const { x, y } = getGraphPointerPosition(event, canvas);
+  return {
+    x: (x - state.graphCamera.x) / state.graphCamera.scale,
+    y: (y - state.graphCamera.y) / state.graphCamera.scale,
   };
 }
 
@@ -727,7 +967,7 @@ function findGraphNodeAtPosition(position) {
     .slice()
     .reverse()
     .find((node) => {
-      const radius = node.fixed ? 13 : 10;
+      const radius = getGraphNodeRadius(node);
       const dx = position.x - node.x;
       const dy = position.y - node.y;
       return Math.sqrt(dx * dx + dy * dy) <= radius + 4;
@@ -738,13 +978,49 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
+function showGraphTooltip(node, clientX, clientY) {
+  const tooltip = selectors.graphTooltip();
+  const canvas = selectors.graphCanvas();
+  if (!tooltip || !canvas) return;
+
+  const containerRect = canvas.parentElement?.getBoundingClientRect();
+  if (!containerRect) return;
+  const offsetX = clientX - containerRect.left + 14;
+  const offsetY = clientY - containerRect.top + 14;
+  const maxX = containerRect.width - 20;
+  const maxY = containerRect.height - 20;
+
+  tooltip.innerHTML = `
+    <strong>${node.label}</strong>
+    <p>${node.detail || '暂无描述'}</p>
+  `;
+  tooltip.style.left = `${clamp(offsetX, 12, maxX)}px`;
+  tooltip.style.top = `${clamp(offsetY, 12, maxY)}px`;
+  tooltip.classList.add('is-visible');
+}
+
+function hideGraphTooltip() {
+  const tooltip = selectors.graphTooltip();
+  if (!tooltip) return;
+  tooltip.classList.remove('is-visible');
+}
+
 function hookFullscreen() {
-  selectors.fullscreenBtn().addEventListener('click', () => {
+  const btn = selectors.fullscreenBtn();
+  btn.addEventListener('click', () => {
     const playerSection = document.querySelector('.player-section');
     if (!document.fullscreenElement) {
       playerSection.requestFullscreen?.().catch(() => undefined);
     } else {
       document.exitFullscreen?.();
+    }
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    if (document.fullscreenElement) {
+      btn.textContent = '缩小';
+    } else {
+      btn.textContent = '全屏';
     }
   });
 }
@@ -759,10 +1035,10 @@ function handle_graph(videoMeta) {
   if (!videoMeta) {
     return {
       nodes: [
-        { id: 'context', label: '通用上下文', fixed: true },
-        { id: 'task', label: '任务' },
-        { id: 'scene', label: '场景' },
-        { id: 'risk', label: '潜在风险' },
+        { id: 'context', label: '通用上下文', type: 'core', detail: '尚未选择视频，展示默认关系' , fixed: true},
+        { id: 'task', label: '任务', type: 'summary', detail: '结合场景定义分析目标' },
+        { id: 'scene', label: '场景', type: 'meta', detail: '默认基础场景节点' },
+        { id: 'risk', label: '潜在风险', type: 'status', detail: '风险取决于具体视频内容' },
       ],
       edges: [
         { from: 'context', to: 'task' },
@@ -773,27 +1049,119 @@ function handle_graph(videoMeta) {
   }
 
   const tags = videoMeta.tags ?? [];
+  const safeName = videoMeta.name || '未命名视频';
+  const durationLabel = videoMeta.durationFormatted ?? formatDuration(videoMeta.durationSeconds);
+  const durationDetail = describeDurationDetail(videoMeta);
+  const uploadedLabel = formatUploadTime(videoMeta.uploadedAt);
+  const summaryText = (videoMeta.summary || '').trim() || '尚未提供摘要';
   const tagNodes = tags.map((tag, idx) => ({
     id: `tag-${idx}`,
     label: tag,
+    type: 'tag',
+    detail: `标签：${tag}`,
   }));
+  const statusNode = deriveStatusNode(videoMeta);
+  const insightNodes = deriveGraphInsights(videoMeta);
 
-  return {
-    nodes: [
-      { id: 'video', label: videoMeta.name, fixed: true },
-      {
-        id: 'duration',
-        label: `时长 ${videoMeta.durationFormatted ?? '未知'}`,
-      },
-      { id: 'summary', label: '关键描述' },
-      ...tagNodes,
-    ],
-    edges: [
-      { from: 'video', to: 'duration' },
-      { from: 'video', to: 'summary' },
-      ...tagNodes.map((node) => ({ from: 'video', to: node.id })),
-    ],
-  };
+  const nodes = [
+    { id: 'video', label: safeName, type: 'core', detail: `来源：${videoMeta.src || '未知'}`, fixed: true },
+    { id: 'summary', label: '内容摘要', type: 'summary', detail: summaryText },
+    { id: 'duration', label: `时长 ${durationLabel}`, type: 'metric', detail: durationDetail },
+    { id: 'uploaded', label: '上传时间', type: 'meta', detail: uploadedLabel },
+    { id: 'tag-hub', label: '标签集合', type: 'hub', detail: tags.length ? tags.join('、') : '暂无标签' },
+    statusNode,
+    ...tagNodes,
+    ...insightNodes,
+  ].filter(Boolean);
+
+  const edges = [
+    { from: 'video', to: 'summary', type: 'highlight' },
+    { from: 'video', to: 'duration' },
+    { from: 'video', to: 'uploaded' },
+    { from: 'video', to: 'tag-hub' },
+    { from: 'video', to: statusNode.id },
+    ...tagNodes.map((node) => ({ from: 'tag-hub', to: node.id })),
+    ...insightNodes.map((node) => ({ from: node.anchor ?? 'summary', to: node.id, type: 'highlight' })),
+  ];
+
+  return { nodes, edges };
+}
+
+function describeDurationDetail(videoMeta) {
+  const seconds = Number(videoMeta.durationSeconds) || 0;
+  if (!seconds) return '无法获取精确时长，建议重新加载视频元信息';
+  const minutes = (seconds / 60).toFixed(1);
+  return `总时长约 ${minutes} 分钟（${Math.round(seconds)} 秒）`;
+}
+
+function formatUploadTime(value) {
+  if (!value) return '尚未记录上传时间';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return '上传时间格式异常';
+  }
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function deriveStatusNode(videoMeta) {
+  const tags = (videoMeta.tags ?? []).map((tag) => tag.toLowerCase());
+  let label = '巡检概况';
+  let detail = '尚未检测到明确的风险标签';
+
+  if (tags.some((tag) => tag.includes('火') || tag.includes('烟'))) {
+    label = '火情关注';
+    detail = '包含火情/烟雾相关标签，建议优先查看热源区域';
+  } else if (tags.some((tag) => tag.includes('安全') || tag.includes('告警'))) {
+    label = '安全告警';
+    detail = '存在安全类标签，可检查安全工装佩戴或告警提示';
+  } else if (tags.length === 0) {
+    label = '待标注';
+    detail = '暂无标签，建议补充关键字以便模型理解场景';
+  }
+
+  return { id: 'status', label, type: 'status', detail };
+}
+
+function deriveGraphInsights(videoMeta) {
+  const insights = [];
+  const durationSeconds = Number(videoMeta.durationSeconds) || 0;
+  const tags = videoMeta.tags ?? [];
+
+  if (durationSeconds >= 300) {
+    insights.push({
+      label: '长时段巡检',
+      detail: '视频超过 5 分钟，适合拆分重点片段查看',
+      anchor: 'duration',
+    });
+  } else if (durationSeconds > 0 && durationSeconds < 60) {
+    insights.push({
+      label: '短片段记录',
+      detail: '时长不足 1 分钟，模型可能需要更多上下文',
+      anchor: 'duration',
+    });
+  }
+
+  if ((tags ?? []).length >= 4) {
+    insights.push({
+      label: '多标签场景',
+      detail: '标签较多，建议聚焦最重要的 3 个标签',
+      anchor: 'tag-hub',
+    });
+  }
+
+  if (!videoMeta.summary || !videoMeta.summary.trim()) {
+    insights.push({
+      label: '缺少摘要',
+      detail: '内容摘要为空，可在对话区快速描述重点场景',
+      anchor: 'summary',
+    });
+  }
+
+  return insights.map((entry, idx) => ({
+    id: `insight-${idx}`,
+    type: 'insight',
+    ...entry,
+  }));
 }
 
 function wireIntervalInteractions() {
@@ -901,5 +1269,381 @@ function formatDuration(seconds) {
 
 function formatTimestamp(seconds) {
   return formatDuration(seconds);
+}
+
+function wireStats() {
+  const statsSection = selectors.statsSection();
+  if (!statsSection) return;
+
+  // UCF-Crime Labels (Translated)
+  const ucfLabels = [
+    '虐待', '逮捕', '纵火', '袭击', '入室盗窃', '爆炸', '打斗', 
+    '交通事故', '抢劫', '射击', '偷窃', '入店行窃', '破坏'
+  ];
+
+  let dailyChartInstance = null;
+  let monthlyChartInstance = null;
+
+  // Chart.js Global Defaults
+  if (window.Chart) {
+    Chart.defaults.color = '#8fbcdb';
+    Chart.defaults.font.family = '"JetBrains Mono", "Inter", sans-serif';
+    Chart.defaults.borderColor = 'rgba(29, 79, 122, 0.3)';
+  }
+
+  const refreshCharts = () => {
+    // Generate random data
+    const dailyData = ucfLabels.map(() => Math.floor(Math.random() * 15));
+    // Generate monthly data (Top 5)
+    const monthlyRaw = ucfLabels.map(label => ({
+      label,
+      value: Math.floor(Math.random() * 100) + 20
+    })).sort((a, b) => b.value - a.value).slice(0, 5);
+
+    // Render Daily Chart
+    const dailyCtx = selectors.dailyChartCanvas()?.getContext('2d');
+    if (dailyCtx) {
+      if (dailyChartInstance) dailyChartInstance.destroy();
+      
+      // Create gradient (Cyberpunk: Top Light/White -> Bottom Deep/Transparent)
+      const gradient = dailyCtx.createLinearGradient(0, 0, 0, 200);
+      gradient.addColorStop(0, 'rgba(200, 255, 255, 0.9)'); // Top: Bright
+      gradient.addColorStop(0.3, 'rgba(0, 242, 255, 0.6)'); // Mid-Top: Cyan
+      gradient.addColorStop(1, 'rgba(0, 242, 255, 0.1)');   // Bottom: Faded
+
+      dailyChartInstance = new Chart(dailyCtx, {
+        type: 'bar',
+        data: {
+          labels: ucfLabels,
+          datasets: [{
+            label: '告警次数',
+            data: dailyData,
+            backgroundColor: gradient,
+            borderColor: '#00f2ff',
+            borderWidth: { top: 2, right: 1, bottom: 0, left: 1 }, // Top highlight
+            barPercentage: 0.6,
+            borderRadius: 2,
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(5, 14, 24, 0.95)',
+              titleColor: '#00f2ff',
+              bodyColor: '#e6f7ff',
+              borderColor: '#1d4f7a',
+              borderWidth: 1,
+              displayColors: false,
+              callbacks: {
+                label: (ctx) => ` ${ctx.raw} 次`
+              }
+            }
+          },
+          scales: {
+            y: { 
+              beginAtZero: true, 
+              grid: { color: 'rgba(29, 79, 122, 0.2)' },
+              ticks: { color: '#8fbcdb' }
+            },
+            x: { 
+              ticks: { 
+                maxRotation: 45, 
+                minRotation: 45,
+                font: { size: 10 },
+                color: '#8fbcdb'
+              },
+              grid: { display: false }
+            }
+          },
+          animation: {
+            duration: 1000,
+            easing: 'easeOutQuart', // Smooth growth
+            delay: (context) => {
+              let delay = 0;
+              if (context.type === 'data' && context.mode === 'default' && !dailyChartInstance) {
+                delay = context.dataIndex * 30 + context.datasetIndex * 100;
+              }
+              return delay;
+            }
+          }
+        }
+      });
+    }
+
+    // Render Monthly Chart
+    const monthlyCtx = selectors.monthlyChartCanvas()?.getContext('2d');
+    if (monthlyCtx) {
+      if (monthlyChartInstance) monthlyChartInstance.destroy();
+
+      // Gradient: Left Light -> Right Deep (or vice versa)
+      // Usually "Growth" implies the end (Right) is the "Head".
+      // Let's make the Right side (Value end) bright.
+      const gradientBlue = monthlyCtx.createLinearGradient(0, 0, 300, 0);
+      gradientBlue.addColorStop(0, 'rgba(24, 144, 255, 0.1)'); // Left: Faded
+      gradientBlue.addColorStop(1, 'rgba(100, 200, 255, 0.9)'); // Right: Bright
+
+      monthlyChartInstance = new Chart(monthlyCtx, {
+        type: 'bar',
+        data: {
+          labels: monthlyRaw.map(d => d.label),
+          datasets: [{
+            label: '月度总计',
+            data: monthlyRaw.map(d => d.value),
+            backgroundColor: gradientBlue,
+            borderColor: '#4da3ff',
+            borderWidth: { top: 1, right: 2, bottom: 1, left: 0 }, // Right highlight
+            barPercentage: 0.5,
+            borderRadius: 2,
+          }]
+        },
+        options: {
+          indexAxis: 'y',
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: 'rgba(5, 14, 24, 0.95)',
+              borderColor: '#1d4f7a',
+              borderWidth: 1,
+              titleColor: '#4da3ff',
+              bodyColor: '#fff'
+            }
+          },
+          scales: {
+            x: { 
+              beginAtZero: true, 
+              grid: { color: 'rgba(29, 79, 122, 0.2)' },
+              ticks: { color: '#8fbcdb' }
+            },
+            y: { 
+              grid: { display: false },
+              ticks: { color: '#e6f7ff' }
+            }
+          },
+          animation: {
+            duration: 1000,
+            easing: 'easeOutQuart',
+            delay: (context) => {
+              let delay = 0;
+              if (context.type === 'data' && context.mode === 'default' && !monthlyChartInstance) {
+                delay = context.dataIndex * 50 + context.datasetIndex * 100;
+              }
+              return delay;
+            }
+          }
+        }
+      });
+    }
+  };
+
+  // Initial load
+  if (window.Chart) {
+    refreshCharts();
+  } else {
+    // Wait for Chart.js to load if not ready
+    const checkChart = setInterval(() => {
+      if (window.Chart) {
+        clearInterval(checkChart);
+        refreshCharts();
+      }
+    }, 100);
+  }
+
+  // Click interaction
+  statsSection.addEventListener('click', () => {
+    statsSection.classList.add('active-click');
+    setTimeout(() => statsSection.classList.remove('active-click'), 300);
+    refreshCharts();
+  });
+
+  const refreshBtn = selectors.refreshStatsBtn();
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      refreshCharts();
+    });
+  }
+}
+
+function wireResizers() {
+  const resizerV = selectors.resizerVertical();
+  const resizerH = selectors.resizerHorizontal();
+  const statsWrapper = selectors.statsWrapper();
+  const graphSection = selectors.graphSection();
+  const rightTopRow = selectors.rightTopRow();
+
+  // New Resizers
+  const resizerLeftRight = document.getElementById('resizerLeftRight');
+  const resizerLeftPanel = document.getElementById('resizerLeftPanel');
+  const leftPanel = document.querySelector('.left-panel');
+  const playerSection = document.querySelector('.player-section');
+
+  // 1. Left vs Right Panel Resizer (Vertical)
+  if (resizerLeftRight && leftPanel) {
+    let isResizing = false;
+    let startX, startWidth;
+
+    resizerLeftRight.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      startX = e.clientX;
+      startWidth = leftPanel.getBoundingClientRect().width;
+      resizerLeftRight.classList.add('active');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+      e.preventDefault();
+      const dx = e.clientX - startX;
+      const newWidth = startWidth + dx;
+      
+      // Constraints
+      const minWidth = 300;
+      const maxWidth = window.innerWidth - 400; // Keep at least 400px for right panel
+
+      if (newWidth >= minWidth && newWidth <= maxWidth) {
+        leftPanel.style.width = `${newWidth}px`;
+        leftPanel.style.flex = `0 0 ${newWidth}px`; // Ensure flex doesn't override
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        resizerLeftRight.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        window.dispatchEvent(new Event('resize'));
+      }
+    });
+  }
+
+  // 2. Left Panel Internal Resizer (Horizontal: Player vs Library)
+  if (resizerLeftPanel && playerSection) {
+    let isResizing = false;
+    let startY, startHeight;
+
+    resizerLeftPanel.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      startY = e.clientY;
+      startHeight = playerSection.getBoundingClientRect().height;
+      resizerLeftPanel.classList.add('active');
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+      e.preventDefault();
+      const dy = e.clientY - startY;
+      const newHeight = startHeight + dy;
+      
+      // Constraints
+      const minHeight = 200;
+      const maxHeight = window.innerHeight - 200; // Keep space for library
+
+      if (newHeight >= minHeight && newHeight <= maxHeight) {
+        playerSection.style.height = `${newHeight}px`;
+        playerSection.style.flex = `0 0 ${newHeight}px`; // Ensure flex doesn't override
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        resizerLeftPanel.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        window.dispatchEvent(new Event('resize'));
+      }
+    });
+  }
+
+  // 3. Existing Vertical Resizer (Between Chat and Stats)
+  if (resizerV && statsWrapper && rightTopRow) {
+    let isResizing = false;
+    let startX, startWidth;
+
+    resizerV.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      startX = e.clientX;
+      startWidth = statsWrapper.getBoundingClientRect().width;
+      resizerV.classList.add('active');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+      e.preventDefault();
+      const dx = startX - e.clientX; // Dragging left increases width
+      const newWidth = startWidth + dx;
+      
+      const containerWidth = rightTopRow.getBoundingClientRect().width;
+      const minWidth = 200;
+      const maxWidth = containerWidth - 200;
+
+      if (newWidth >= minWidth && newWidth <= maxWidth) {
+        statsWrapper.style.width = `${newWidth}px`;
+        // Force flex basis update if needed
+        // statsWrapper.style.flex = `0 0 ${newWidth}px`; 
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        resizerV.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        window.dispatchEvent(new Event('resize')); // Trigger Chart.js resize
+      }
+    });
+  }
+
+  // Horizontal Resizer (Between Top Row and Graph)
+  if (resizerH && graphSection) {
+    let isResizing = false;
+    let startY, startHeight;
+
+    resizerH.addEventListener('mousedown', (e) => {
+      isResizing = true;
+      startY = e.clientY;
+      startHeight = graphSection.getBoundingClientRect().height;
+      resizerH.classList.add('active');
+      document.body.style.cursor = 'row-resize';
+      document.body.style.userSelect = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (!isResizing) return;
+      e.preventDefault();
+      const dy = startY - e.clientY; // Dragging up increases height
+      const newHeight = startHeight + dy;
+      
+      const minHeight = 150;
+      const maxHeight = 800;
+
+      if (newHeight >= minHeight && newHeight <= maxHeight) {
+        graphSection.style.height = `${newHeight}px`;
+        graphSection.style.flex = `0 0 ${newHeight}px`;
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      if (isResizing) {
+        isResizing = false;
+        resizerH.classList.remove('active');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        window.dispatchEvent(new Event('resize'));
+      }
+    });
+  }
 }
 

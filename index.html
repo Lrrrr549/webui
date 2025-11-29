@@ -3,9 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>视频处理 WebUI</title>
+    <title>社会治理垂域模型</title>
     <!-- 恢复对外部 JS 文件的引用 -->
     <script type="module" src="scripts/app.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     
     <link
       rel="preconnect"
@@ -24,9 +25,9 @@
     <style>
       /* --- 核心变量定义 (赛博科技风格) --- */
       :root {
-        --bg-core: #050e18; /* 深空背景 */
-        --bg-panel: rgba(12, 28, 48, 0.75); /* 半透明面板 */
-        --bg-panel-hover: rgba(18, 40, 68, 0.85);
+        --bg-core: #0b1624; /* 稍微调亮背景 (原 #050e18) */
+        --bg-panel: rgba(16, 36, 60, 0.75); /* 稍微调亮面板 */
+        --bg-panel-hover: rgba(22, 48, 80, 0.85);
         --border-tech: #1d4f7a; /* 装饰性边框暗色 */
         --accent-cyan: #00f2ff; /* 核心高亮青色 */
         --accent-blue: #1890ff; /* 次级蓝色 */
@@ -48,15 +49,18 @@
 
       body {
         background-color: var(--bg-core);
-        /* 背景网格纹理 */
-        background-image: 
-          linear-gradient(var(--grid-line) 1px, transparent 1px),
-          linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-        background-size: 40px 40px;
+        /* 背景图片 */
+        background-image: url('img/background.png');
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
         color: var(--text-main);
         font-family: var(--font-ui);
         height: 100vh;
         overflow: hidden;
+        /* 修改布局为垂直 Flex，以便容纳 Header */
+        display: flex;
+        flex-direction: column;
       }
 
       /* 自定义滚动条 */
@@ -75,20 +79,73 @@
         background: var(--accent-cyan);
       }
 
-      /* --- 布局结构 --- */
+      /* --- 新增：顶部标题栏样式 --- */
+      .site-header {
+        position: relative;
+        width: 100%;
+        height: 60px; /* 增加高度以完整显示背景装饰 */
+        flex-shrink: 0; /* 防止被压缩 */
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        border-bottom: 1px solid var(--border-tech);
+        box-shadow: 0 2px 20px rgba(0, 242, 255, 0.15);
+        background: rgba(5, 14, 24, 0.8);
+        z-index: 100;
+        overflow: hidden; /* 防止图片溢出 */
+      }
+.header-bg {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 60%;
+        height: 100%;
+        transform: translate(-50%, -50%); /* 居中显示（水平+垂直） */
+        object-fit: cover; /* 确保图片填满且不变形 */
+        object-position: center; /* 确保图片内容居中显示 */
+        z-index: 0;
+        opacity: 0.9;
+      }
+
+      .header-title-text {
+        position: relative;
+        z-index: 1; /* 确保文字在图片上方 */
+        font-size: 30px; /* 稍微调大字体 */
+        font-weight: 700;
+        letter-spacing: 6px;
+        text-transform: uppercase;
+        
+        /* 核心调整：通过 margin-bottom 将文字向上推，使其位于中心线（背景装饰线）的上方 */
+        /* margin-bottom: 0px;  */
+        
+        /* 渐变发光文字效果 */
+        background: linear-gradient(180deg, #ffffff 0%, var(--accent-cyan) 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        filter: drop-shadow(0 0 10px var(--accent-blue));
+        
+        /* 如果不支持 text-fill-color 的备选方案 */
+        text-shadow: 0 0 15px rgba(0, 242, 255, 0.6);
+      }
+
+      /* --- 布局结构调整 --- */
       .app-shell {
         display: flex;
-        height: 100vh;
+        /* 移除固定 100vh，改为填充剩余空间 */
+        flex: 1; 
         padding: 20px;
-        gap: 20px;
+        gap: 0;
+        overflow: hidden; /* 内部滚动 */
+        height: 100%;
       }
 
       aside.left-panel {
         width: 450px;
         display: flex;
         flex-direction: column;
-        gap: 20px;
+        gap: 0;
         flex-shrink: 0;
+        height: 100%; /* 确保填满父容器高度 */
       }
 
       main.right-panel {
@@ -97,6 +154,7 @@
         flex-direction: column;
         gap: 20px;
         min-width: 0;
+        height: 100%; /* 确保填满父容器高度 */
       }
 
       /* --- 通用面板样式 --- */
@@ -219,13 +277,17 @@
       /* --- 左侧: 播放器 --- */
       .player-section {
         flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
       }
       
       .video-display {
         width: 100%;
         background: #000;
         border: 1px solid var(--border-tech);
-        aspect-ratio: 16/9;
+        flex: 1;
+        min-height: 0;
+        object-fit: contain;
         margin-bottom: 10px;
       }
 
@@ -286,30 +348,73 @@
       }
 
       /* JS生成的列表项样式参考 */
-      .video-item {
+      .video-card {
         display: flex;
-        justify-content: space-between;
         align-items: center;
+        gap: 10px;
         padding: 10px;
         border-bottom: 1px solid rgba(255,255,255,0.05);
         cursor: pointer;
         transition: background 0.2s;
       }
-      .video-item:hover {
+      .video-card:hover {
         background: rgba(0, 242, 255, 0.05);
       }
-      .video-item.active {
+      .video-card.active {
         background: rgba(0, 242, 255, 0.1);
         border-left: 3px solid var(--accent-cyan);
       }
-      .video-info h4 {
+      
+      .video-card img {
+        width: 80px;
+        height: 45px;
+        object-fit: cover;
+        border-radius: 2px;
+        border: 1px solid var(--border-tech);
+        flex-shrink: 0;
+      }
+
+      .video-info {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
+      
+      .video-info strong {
         font-size: 14px;
         color: var(--text-main);
-        margin-bottom: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
       }
-      .video-info p {
+      
+      .video-info span {
         font-size: 12px;
         color: var(--text-sub);
+        font-family: var(--font-mono);
+        white-space: nowrap;
+      }
+
+      .delete-video-btn {
+        background: transparent;
+        border: 1px solid var(--border-tech);
+        color: var(--text-sub);
+        padding: 4px 8px;
+        border-radius: 2px;
+        font-size: 12px;
+        opacity: 0;
+        transition: all 0.2s;
+      }
+      .video-card:hover .delete-video-btn {
+        opacity: 1;
+      }
+      .delete-video-btn:hover {
+        border-color: #ff4d4f;
+        color: #ff4d4f;
+        box-shadow: 0 0 5px rgba(255, 77, 79, 0.3);
       }
 
       /* 新增视频面板 */
@@ -357,24 +462,170 @@
         border-radius: 2px;
       }
 
-      /* --- 右侧: 聊天 & 知识图谱 --- */
+      .right-panel {
+        gap: 0 !important; /* Override styles.css to control gap manually via resizer */
+      }
+
+      .right-top-row {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+        position: relative;
+        overflow: hidden; /* Ensure content doesn't overflow during resize */
+      }
+
+      .chat-wrapper {
+        flex: 1;
+        min-width: 200px;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg-panel);
+        border: 1px solid var(--border-tech);
+        height: 100%; /* Ensure full height */
+      }
+
       .chat-section {
         flex: 1;
-        min-height: 200px;
+        display: flex;
+        flex-direction: column;
+        border: none;
+        background: transparent;
+        height: 100%;
+        overflow: hidden;
+      }
+
+      .stats-wrapper {
+        width: 350px;
+        background: var(--bg-panel);
+        border: 1px solid var(--border-tech);
+        display: flex;
+        flex-direction: column;
+        min-width: 200px;
+        height: 100%; /* Ensure full height */
+      }
+
+      .stats-section {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        border: none;
+        background: transparent;
+        position: relative;
+        transition: box-shadow 0.5s ease-out, border-color 0.5s ease-out;
+        height: 100%;
+        overflow: hidden;
       }
       
-      .model-selector {
+      .stats-section.active-click {
+        box-shadow: inset 0 0 40px rgba(0, 242, 255, 0.5);
+        border-color: var(--accent-cyan);
+        transition: none; /* Instant on */
+      }
+
+      .stats-click-hint {
+        display: none; /* Removed old hint */
+      }
+
+      /* Resizer Styles */
+      .resizer-vertical {
+        width: 6px;
+        background: transparent;
+        cursor: col-resize;
+        flex-shrink: 0;
+        position: relative;
+        z-index: 10;
         display: flex;
         align-items: center;
-        gap: 8px;
+        justify-content: center;
+      }
+      .resizer-vertical::after {
+        content: '';
+        width: 2px;
+        height: 40px;
+        background: var(--border-tech);
+        border-radius: 1px;
+        transition: all 0.3s ease;
+        opacity: 0.5;
+      }
+      .resizer-vertical:hover::after, .resizer-vertical.active::after {
+        background: var(--accent-cyan);
+        height: 60px;
+        opacity: 1;
+        box-shadow: 0 0 10px var(--accent-cyan);
+      }
+
+      .resizer-horizontal {
+        height: 6px;
+        background: transparent;
+        cursor: row-resize;
+        flex-shrink: 0;
+        position: relative;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 0;
+        width: 100%;
+      }
+      .resizer-horizontal::after {
+        content: '';
+        height: 2px;
+        width: 40px;
+        background: var(--border-tech);
+        border-radius: 1px;
+        transition: all 0.3s ease;
+        opacity: 0.5;
+      }
+      .resizer-horizontal:hover::after, .resizer-horizontal.active::after {
+        background: var(--accent-cyan);
+        width: 60px;
+        opacity: 1;
+        box-shadow: 0 0 10px var(--accent-cyan);
+      }
+
+      .graph-section {
+        height: 300px;
+        flex: 0 0 auto;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .charts-container {
+        flex: 1;
+        padding: 10px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-height: 0; /* Allow shrinking */
+      }
+
+      .chart-box {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 120px; /* Reduced min-height to allow more flexibility */
+        background: rgba(0, 0, 0, 0.2);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 4px;
+        padding: 10px;
+        overflow: hidden;
+      }
+
+      .chart-box h4 {
         font-size: 12px;
         color: var(--text-sub);
+        margin-bottom: 8px;
+        text-align: center;
+        flex-shrink: 0;
       }
-      .model-selector select {
-        background: #020810;
-        border-color: var(--accent-blue);
-        color: var(--accent-cyan);
-        font-weight: bold;
+
+      .chart-canvas-container {
+        flex: 1;
+        position: relative;
+        width: 100%;
+        min-height: 0;
+        overflow: hidden; /* Critical fix for Chart.js growth bug */
       }
 
       .chat-window {
@@ -438,6 +689,42 @@
         height: 100%;
       }
 
+      .graph-tooltip {
+        position: absolute;
+        min-width: 180px;
+        max-width: 260px;
+        background: rgba(5, 14, 24, 0.9);
+        border: 1px solid var(--border-tech);
+        border-radius: 6px;
+        padding: 10px 12px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+        pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity 0.15s ease;
+        color: var(--text-main);
+        z-index: 3;
+      }
+
+      .graph-tooltip.is-visible {
+        opacity: 1;
+        visibility: visible;
+      }
+
+      .graph-tooltip strong {
+        display: block;
+        font-size: 13px;
+        margin-bottom: 4px;
+        color: var(--accent-cyan);
+      }
+
+      .graph-tooltip p {
+        margin: 0;
+        font-size: 12px;
+        line-height: 1.4;
+        color: var(--text-sub);
+      }
+
       .input-section {
         flex: 0 0 auto;
         display: flex;
@@ -448,7 +735,7 @@
       .input-section textarea {
         flex: 1;
         resize: none;
-        height: 50px;
+        height: 40px;
         background: rgba(5, 14, 24, 0.8);
         border: 1px solid var(--border-tech);
         transition: height 0.2s;
@@ -470,10 +757,28 @@
         box-shadow: 0 0 15px var(--accent-cyan);
       }
 
+      .graph-exit-btn {
+        position: absolute;
+        top: 20px;
+        right: 20px;
+        z-index: 10;
+        display: none; /* 默认隐藏 */
+        background: rgba(5, 14, 24, 0.8);
+        border: 1px solid var(--accent-cyan);
+        color: var(--accent-cyan);
+      }
+      
+      .graph-container.is-fullscreen .graph-exit-btn {
+        display: block;
+      }
+
       @media (max-width: 1024px) {
         .app-shell {
           flex-direction: column;
           overflow-y: auto;
+          /* Mobile view needs to override the flex:1 behavior slightly or handle scrolling on body */
+          height: auto; 
+          flex: auto;
         }
         aside.left-panel {
           width: 100%;
@@ -490,11 +795,17 @@
     </style>
   </head>
   <body>
+    <!-- 新增：顶部标题栏 -->
+    <header class="site-header">
+      <img src="img/title.png" alt="Header Background" class="header-bg" />
+      <h1 class="header-title-text">社会治理垂域模型</h1>
+    </header>
+
     <div class="app-shell">
       <aside class="left-panel">
         <section class="player-section">
           <div class="player-header">
-            <h2>视频预览</h2>
+            <h2>实时视频</h2>
             <button id="fullscreenBtn" class="ghost-btn">全屏</button>
           </div>
           <video
@@ -511,7 +822,7 @@
           </video>
           <div class="interval-panel">
             <div class="interval-header">
-              <span>模型时间检测</span>
+              <span>异常事件分割</span>
             </div>
             <div id="intervalList" class="interval-chips">
               <span class="interval-placeholder">
@@ -520,6 +831,9 @@
             </div>
           </div>
         </section>
+
+        <div class="resizer-horizontal" id="resizerLeftPanel"></div>
+
         <section class="library-section">
           <div class="section-title">
             <h3>视频库</h3>
@@ -588,39 +902,77 @@
         </section>
       </aside>
 
+      <div class="resizer-vertical" id="resizerLeftRight"></div>
+
       <main class="right-panel">
-        <section class="chat-section">
-          <div class="section-title">
-            <h3>异常事件解析模型</h3>
-            <div class="model-selector">
-              <label for="modelSelect">模型:</label>
-              <select id="modelSelect">
-                <option value="qwenvl">Qwen-VL</option>
-                <option value="ours">Ours</option>
-              </select>
-            </div>
+        <div class="right-top-row">
+          <div class="chat-wrapper">
+            <section class="chat-section">
+              <div class="section-title">
+                <h3>异常事件解析</h3>
+                <div class="model-selector">
+                  <label for="modelSelect">模型:</label>
+                  <select id="modelSelect">
+                    <option value="qwenvl">Qwen-VL</option>
+                    <option value="ours">Ours</option>
+                  </select>
+                </div>
+              </div>
+              <div id="chatWindow" class="chat-window">
+                <!-- 聊天记录将由 scripts/app.js 填充 -->
+              </div>
+              <div class="input-section">
+                <textarea
+                  id="userInput"
+                  placeholder="描述你想与模型交流的内容，或针对视频提出问题..."
+                ></textarea>
+                <button id="sendBtn">发送</button>
+              </div>
+            </section>
           </div>
-          <div id="chatWindow" class="chat-window">
-            <!-- 聊天记录将由 scripts/app.js 填充 -->
+
+          <div class="resizer-vertical" id="resizerVertical"></div>
+
+          <div class="stats-wrapper">
+            <section class="stats-section" id="statsSection">
+              <div class="stats-click-hint"></div>
+              <div class="section-title">
+                <h3>告警统计</h3>
+                <button id="refreshStatsBtn" class="ghost-btn" style="margin-left: auto;">刷新</button>
+              </div>
+              <div class="charts-container">
+                <div class="chart-box">
+                  <h4>当日告警</h4>
+                  <div class="chart-canvas-container">
+                    <canvas id="dailyChartCanvas"></canvas>
+                  </div>
+                </div>
+                <div class="chart-box">
+                  <h4>月度总告警</h4>
+                  <div class="chart-canvas-container">
+                    <canvas id="monthlyChartCanvas"></canvas>
+                  </div>
+                </div>
+              </div>
+            </section>
           </div>
-        </section>
+        </div>
+
+        <div class="resizer-horizontal" id="resizerHorizontal"></div>
 
         <section class="graph-section">
           <div class="section-title">
             <h3>知识图谱</h3>
-            <button id="refreshGraphBtn" class="ghost-btn">刷新</button>
+            <div style="display: flex; gap: 8px;">
+              <button id="refreshGraphBtn" class="ghost-btn">刷新</button>
+              <button id="graphFullscreenBtn" class="ghost-btn">全屏</button>
+            </div>
           </div>
           <div id="graphContainer" class="graph-container">
             <canvas id="graphCanvas"></canvas>
+            <div id="graphTooltip" class="graph-tooltip" aria-live="polite"></div>
+            <button id="graphExitFullscreenBtn" class="ghost-btn graph-exit-btn">缩小</button>
           </div>
-        </section>
-
-        <section class="input-section">
-          <textarea
-            id="userInput"
-            placeholder="描述你想与模型交流的内容，或针对视频提出问题..."
-          ></textarea>
-          <button id="sendBtn">发送</button>
         </section>
       </main>
     </div>
